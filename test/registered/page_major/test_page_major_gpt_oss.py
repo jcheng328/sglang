@@ -1,10 +1,12 @@
 """
 End-to-end accuracy test for the page-major KV layout on a hybrid-SWA MoE model.
 
-Launches gpt-oss-20b with ``--enable-page-major-kv-layout`` on the Triton
-attention backend and checks that GSM8K accuracy holds. This exercises the
-SWA + full-attention KV pools under the page-granularity envelope layout
-(SWAKVPool routes both sub-pools through PageMajorMHATokenToKVPool).
+Launches gpt-oss-20b with ``--enable-page-major-kv-layout`` on the Triton,
+FlashInfer, and FA3 attention backends and checks that GSM8K accuracy holds
+under each. This exercises the SWA + full-attention KV pools under the
+page-granularity envelope layout (SWAKVPool routes both sub-pools through
+PageMajorMHATokenToKVPool), reading the strided 4-D K/V views through each
+backend's paged-attention kernel.
 
 Registered to the label-gated ``run-ci-extra`` suite (opt-in, not per-commit).
 
@@ -20,7 +22,7 @@ from sglang.test.ci.ci_register import register_cuda_ci
 from sglang.test.server_fixtures.default_fixture import DefaultServerBase
 from sglang.test.test_utils import DEFAULT_MODEL_NAME_FOR_TEST_MXFP4_WITH_MOE
 
-register_cuda_ci(est_time=420, stage="extra-a", runner_config="1-gpu-large")
+register_cuda_ci(est_time=1200, stage="extra-a", runner_config="1-gpu-large")
 
 
 class TestPageMajorGptOss(DefaultServerBase):
@@ -63,6 +65,32 @@ class TestPageMajorGptOss(DefaultServerBase):
             f"(threshold: {self.gsm8k_threshold})"
         )
         self.assertGreaterEqual(metrics["accuracy"], self.gsm8k_threshold)
+
+
+class TestPageMajorGptOssFlashInfer(TestPageMajorGptOss):
+    """Page-major KV layout on gpt-oss-20b (hybrid-SWA MoE), FlashInfer backend."""
+
+    other_args = [
+        "--enable-page-major-kv-layout",
+        "--attention-backend",
+        "flashinfer",
+        "--mem-fraction-static",
+        "0.70",
+        "--cuda-graph-backend-prefill=disabled",
+    ]
+
+
+class TestPageMajorGptOssFA3(TestPageMajorGptOss):
+    """Page-major KV layout on gpt-oss-20b (hybrid-SWA MoE), FA3 backend."""
+
+    other_args = [
+        "--enable-page-major-kv-layout",
+        "--attention-backend",
+        "fa3",
+        "--mem-fraction-static",
+        "0.70",
+        "--cuda-graph-backend-prefill=disabled",
+    ]
 
 
 if __name__ == "__main__":

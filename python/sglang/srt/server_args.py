@@ -815,8 +815,9 @@ class ServerArgs:
         "Enable the page-major KV layout: lay out the Mamba state and full/SWA "
         "KV caches in a page-granularity envelope (page is the outermost axis, "
         "layer-major within a page) instead of the default per-layer "
-        "(layer-major) layout. Requires the Triton attention / linear-attn / "
-        "Mamba backends.",
+        "(layer-major) layout. The full-attention layers require the Triton, "
+        "FlashInfer, or FA3 attention backend; the linear-attn / Mamba state "
+        "still requires the Triton linear-attn / Mamba backends.",
     ] = False
     enable_unified_memory: A[
         bool,
@@ -6414,14 +6415,24 @@ class ServerArgs:
             self.enable_page_major_kv_layout = True
         if not self.enable_page_major_kv_layout:
             return
-        # Only the Triton attention kernels read the strided 4-D envelope K/V
-        # views; FA3 / FlashInfer do not.
+        # The Triton, FlashInfer, and FA3 paged attention kernels all address
+        # K/V through the pool's own (possibly non-page-contiguous) tensor
+        # strides rather than assuming a fixed page byte stride, so they read
+        # the strided 4-D envelope views correctly. Other backends (e.g.
+        # torch_native, flashmla) have not been made stride-aware.
         backends = set(self._resolved_attention_backends())
         backends.discard(None)
-        assert backends <= {"triton"}, (
-            "--enable-page-major-kv-layout requires the Triton attention backend "
-            f"for the full-attention layers; got {sorted(backends)}. Pass "
-            "--attention-backend triton."
+        assert backends <= {"triton", "flashinfer", "fa3"}, (
+            "--enable-page-major-kv-layout requires the Triton, FlashInfer, or "
+            f"FA3 attention backend for the full-attention layers; got "
+            f"{sorted(backends)}. Pass --attention-backend triton|flashinfer|fa3."
+        )
+        # The unified pool's dynamic sub-pool split has only been validated
+        # against the Triton path; keep it scoped there even though the plain
+        # page-major layout now also supports FlashInfer / FA3.
+        assert not self.enable_unified_memory or backends <= {"triton"}, (
+            "--enable-unified-memory requires the Triton attention backend; got "
+            f"{sorted(backends)}. Pass --attention-backend triton."
         )
         # The Mamba state is stored in envelope-strided views; only the
         # stride-aware Triton causal-conv / SSM kernels read them correctly.

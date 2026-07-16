@@ -1606,6 +1606,62 @@ class TestGrpcServerArgs(CustomTestCase):
         self.assertNotIn("max_prefill_tokens", kwargs)
 
 
+class TestPageMajorKvLayoutBackends(CustomTestCase):
+    """--enable-page-major-kv-layout's full-attention backend allowlist.
+
+    The page-major envelope pool exposes each layer's K/V as a 4-D view whose
+    page-dim stride is not the "natural" page_size*head*dim (pages interleave
+    with other layers' bytes). Triton, FlashInfer, and FA3 all address K/V
+    through the tensor's own strides rather than assuming that natural stride,
+    so they read the envelope correctly; other backends have not been made
+    stride-aware and must still be rejected.
+
+    dummy-model short-circuits __post_init__, so the guard handler is invoked
+    directly (same pattern as TestWaterfillArgs)."""
+
+    def _args(self, attention_backend, **overrides):
+        args = ServerArgs(
+            model_path="dummy",
+            enable_page_major_kv_layout=True,
+            attention_backend=attention_backend,
+        )
+        for key, value in overrides.items():
+            setattr(args, key, value)
+        return args
+
+    def test_triton_ok(self):
+        self._args("triton")._handle_page_major_kv_layout()
+
+    def test_flashinfer_ok(self):
+        self._args("flashinfer")._handle_page_major_kv_layout()
+
+    def test_fa3_ok(self):
+        self._args("fa3")._handle_page_major_kv_layout()
+
+    def test_split_prefill_decode_backends_ok(self):
+        # prefill/decode may independently be any allowed backend.
+        args = self._args(
+            None, prefill_attention_backend="fa3", decode_attention_backend="flashinfer"
+        )
+        args._handle_page_major_kv_layout()
+
+    def test_unsupported_backend_rejected(self):
+        with self.assertRaisesRegex(AssertionError, "Triton, FlashInfer, or FA3"):
+            self._args("torch_native")._handle_page_major_kv_layout()
+
+    def test_unified_memory_still_requires_triton(self):
+        # The dynamic-split unified pool has only been validated against the
+        # Triton path even though the plain envelope layout now also accepts
+        # FlashInfer / FA3.
+        args = self._args("flashinfer", enable_unified_memory=True)
+        with self.assertRaisesRegex(AssertionError, "enable-unified-memory requires"):
+            args._handle_page_major_kv_layout()
+
+    def test_unified_memory_triton_ok(self):
+        args = self._args("triton", enable_unified_memory=True)
+        args._handle_page_major_kv_layout()
+
+
 class TestTwoBatchOverlapBackend(CustomTestCase):
     """Non-EP DP two-batch-overlap backend requirement.
 

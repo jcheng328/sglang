@@ -1273,8 +1273,15 @@ class FlashAttentionBackend(AttentionBackend):
                     # Here metadata_expand.page_table is not divided with page_size.
                     # This is because we loose the fine control of  what token to attend,
                     # but has to attend to some block completely.
-                    k_cache=key_cache.view(-1, 1, layer.tp_k_head_num, layer.head_dim),
-                    v_cache=value_cache.view(
+                    # reshape (not view): under the page-major envelope layout
+                    # (--enable-page-major-kv-layout) the (num_pages, page_size, ...)
+                    # buffer's page stride skips over other layers' bytes, so merging
+                    # the page/slot dims into page_size=1 blocks isn't expressible as a
+                    # view and needs a copy.
+                    k_cache=key_cache.reshape(
+                        -1, 1, layer.tp_k_head_num, layer.head_dim
+                    ),
+                    v_cache=value_cache.reshape(
                         -1, 1, layer.tp_v_head_num, layer.head_dim
                     ),
                     page_table=self.forward_metadata_spec_decode_expand.page_table,

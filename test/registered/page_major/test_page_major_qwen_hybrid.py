@@ -2,11 +2,13 @@
 End-to-end accuracy test for the page-major KV layout on a GDN-hybrid model.
 
 Launches Qwen3.5-4B (a gated-delta-net / linear-attention hybrid) with
-``--enable-page-major-kv-layout`` on the Triton attention + linear-attn + Mamba
-backends and checks that GSM8K accuracy holds. This exercises the page-major
-path most prone to subtle bugs: the Mamba conv/SSM state stored as a strided
-envelope view, plus the full-attention KV pool, both read/written by the GDN
-prefill and decode kernels.
+``--enable-page-major-kv-layout`` on the Triton linear-attn + Mamba backends
+(required for the strided conv/SSM state) crossed with the Triton, FlashInfer,
+and FA3 full-attention backends, and checks that GSM8K accuracy holds under
+each. This exercises the page-major path most prone to subtle bugs: the Mamba
+conv/SSM state stored as a strided envelope view (always via the Triton GDN
+prefill/decode kernels), plus the full-attention KV pool read through each
+attention backend's paged-attention kernel.
 
 Registered to the label-gated ``run-ci-extra`` suite (opt-in, not per-commit).
 
@@ -22,7 +24,7 @@ from sglang.test.ci.ci_register import register_cuda_ci
 from sglang.test.server_fixtures.default_fixture import DefaultServerBase
 from sglang.test.test_utils import DEFAULT_HYBRID_GDN_SMALL_MODEL_NAME_FOR_TEST
 
-register_cuda_ci(est_time=300, stage="extra-a", runner_config="1-gpu-large")
+register_cuda_ci(est_time=900, stage="extra-a", runner_config="1-gpu-large")
 
 
 class TestPageMajorQwenHybrid(DefaultServerBase):
@@ -73,6 +75,42 @@ class TestPageMajorQwenHybrid(DefaultServerBase):
             f"(threshold: {self.gsm8k_threshold})"
         )
         self.assertGreaterEqual(metrics["accuracy"], self.gsm8k_threshold)
+
+
+class TestPageMajorQwenHybridFlashInfer(TestPageMajorQwenHybrid):
+    """Page-major KV layout on Qwen3.5-4B (GDN-hybrid); FlashInfer full-attention,
+    Triton linear-attn / Mamba."""
+
+    other_args = [
+        "--trust-remote-code",
+        "--mem-fraction-static",
+        "0.85",
+        "--enable-page-major-kv-layout",
+        "--attention-backend",
+        "flashinfer",
+        "--linear-attn-backend",
+        "triton",
+        "--mamba-backend",
+        "triton",
+    ]
+
+
+class TestPageMajorQwenHybridFA3(TestPageMajorQwenHybrid):
+    """Page-major KV layout on Qwen3.5-4B (GDN-hybrid); FA3 full-attention,
+    Triton linear-attn / Mamba."""
+
+    other_args = [
+        "--trust-remote-code",
+        "--mem-fraction-static",
+        "0.85",
+        "--enable-page-major-kv-layout",
+        "--attention-backend",
+        "fa3",
+        "--linear-attn-backend",
+        "triton",
+        "--mamba-backend",
+        "triton",
+    ]
 
 
 if __name__ == "__main__":
