@@ -6415,6 +6415,17 @@ class ServerArgs:
             self.enable_page_major_kv_layout = True
         if not self.enable_page_major_kv_layout:
             return
+        # kv_cache_configurator only swaps the MHA-shaped pool class
+        # (PageMajorMHATokenToKVPool) for the plain/SWA path; the MLA branches
+        # (_build_mla_kv_pool / _build_mla_fp4_kv_pool / _build_dsa_kv_pool)
+        # never consult it, so an MLA model would silently keep the default
+        # per-layer layout instead of erroring.
+        assert not self.use_mla_backend(), (
+            "--enable-page-major-kv-layout is not supported for MLA models: the "
+            "page-major envelope pool only exists for the MHA-shaped KV cache, "
+            "so the flag would be silently ignored. Remove "
+            "--enable-page-major-kv-layout."
+        )
         # The Triton, FlashInfer, and FA3 paged attention kernels all address
         # K/V through the pool's own (possibly non-page-contiguous) tensor
         # strides rather than assuming a fixed page byte stride, so they read
@@ -6434,6 +6445,24 @@ class ServerArgs:
             "--enable-unified-memory requires the Triton attention backend; got "
             f"{sorted(backends)}. Pass --attention-backend triton."
         )
+        # FA3's cascade-attention "expand" path (taken whenever spec-decode
+        # topk > 1) merges the page/slot dims via a reshape. Triton's
+        # page-aware kernels take page_size as a runtime/constexpr param and
+        # never need this merge, but FA3 has no such path: under the
+        # envelope's non-page-contiguous page stride at page_size > 1, that
+        # reshape can't be expressed as a view and silently copies the
+        # entire per-layer K/V buffers on every forward step. Block the
+        # combination outright rather than eating that memory/perf cliff.
+        if "fa3" in backends and self.page_size > 1:
+            topk = self.speculative_eagle_topk or 0
+            assert not (self.speculative_algorithm is not None and topk > 1), (
+                "--enable-page-major-kv-layout with the FA3 attention backend and "
+                f"--page-size {self.page_size} (> 1) is incompatible with "
+                f"speculative decoding topk > 1 (got --speculative-eagle-topk "
+                f"{topk}): FA3's cascade-attention path would silently copy the "
+                "entire per-layer K/V buffers every forward step. Use --page-size "
+                "1, --speculative-eagle-topk 1, or --attention-backend triton."
+            )
         # The Mamba state is stored in envelope-strided views; only the
         # stride-aware Triton causal-conv / SSM kernels read them correctly.
         linear_backends = {

@@ -18,7 +18,7 @@ from sglang.test.kits.spec_server_kits import (
 )
 from sglang.test.server_fixtures.spec_eagle_fixture import Eagle3Base, EagleLlama2Base
 
-register_cuda_ci(est_time=600, stage="base-b", runner_config="1-gpu-large")
+register_cuda_ci(est_time=780, stage="base-b", runner_config="1-gpu-large")
 
 
 class TestEagle3Fa3(Eagle3Base, SpecCorrectnessKit, SpecAccuracyKit, SpecLogprobKit):
@@ -45,6 +45,29 @@ class TestEagleLlama2Fa3Page256(
     page_size = 256
     chunked_prefill_size = 4096  # must be divisible by page_size (256)
     cuda_graph_max_bs_decode = 5
+    env_overrides = ((envs.SGLANG_ENABLE_STRICT_MEM_CHECK_DURING_BUSY, 1),)
+
+
+class TestEagleLlama2Fa3PageMajor(
+    EagleLlama2Base,
+    SpecCorrectnessKit,
+    SpecAccuracyKit,
+    SpecLogprobKit,
+    SpecPenaltyKit,
+):
+    """EAGLE/Llama-2 topk=8 tree on fa3 + --enable-page-major-kv-layout.
+
+    page_size stays at the fixture default (1): server_args rejects fa3 +
+    page-major + page_size>1 + topk>1 together (the cascade-attention
+    "expand" path would reshape-copy the whole per-layer K/V pool under the
+    envelope's non-page-contiguous page stride). This is the only test that
+    exercises that expand path (flashattention_backend's use_cascade_attn
+    branch) under the page-major layout -- the one FA3 code change this
+    feature makes.
+    """
+
+    attention_backend = "fa3"
+    extra_args = ("--enable-page-major-kv-layout",)
     env_overrides = ((envs.SGLANG_ENABLE_STRICT_MEM_CHECK_DURING_BUSY, 1),)
 
 

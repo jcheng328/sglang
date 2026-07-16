@@ -1606,6 +1606,7 @@ class TestGrpcServerArgs(CustomTestCase):
         self.assertNotIn("max_prefill_tokens", kwargs)
 
 
+@patch.object(ServerArgs, "use_mla_backend", return_value=False)
 class TestPageMajorKvLayoutBackends(CustomTestCase):
     """--enable-page-major-kv-layout's full-attention backend allowlist.
 
@@ -1616,8 +1617,11 @@ class TestPageMajorKvLayoutBackends(CustomTestCase):
     so they read the envelope correctly; other backends have not been made
     stride-aware and must still be rejected.
 
-    dummy-model short-circuits __post_init__, so the guard handler is invoked
-    directly (same pattern as TestWaterfillArgs)."""
+    Every test method is patched (class-level decorator) to report a non-MLA
+    model, since the guard itself asserts on ``use_mla_backend()`` -- see
+    ``test_mla_model_rejected`` for the positive case. dummy-model
+    short-circuits __post_init__, so the guard handler is invoked directly
+    (same pattern as TestWaterfillArgs)."""
 
     def _args(self, attention_backend, **overrides):
         args = ServerArgs(
@@ -1629,27 +1633,27 @@ class TestPageMajorKvLayoutBackends(CustomTestCase):
             setattr(args, key, value)
         return args
 
-    def test_triton_ok(self):
+    def test_triton_ok(self, _mock_mla):
         self._args("triton")._handle_page_major_kv_layout()
 
-    def test_flashinfer_ok(self):
+    def test_flashinfer_ok(self, _mock_mla):
         self._args("flashinfer")._handle_page_major_kv_layout()
 
-    def test_fa3_ok(self):
+    def test_fa3_ok(self, _mock_mla):
         self._args("fa3")._handle_page_major_kv_layout()
 
-    def test_split_prefill_decode_backends_ok(self):
+    def test_split_prefill_decode_backends_ok(self, _mock_mla):
         # prefill/decode may independently be any allowed backend.
         args = self._args(
             None, prefill_attention_backend="fa3", decode_attention_backend="flashinfer"
         )
         args._handle_page_major_kv_layout()
 
-    def test_unsupported_backend_rejected(self):
+    def test_unsupported_backend_rejected(self, _mock_mla):
         with self.assertRaisesRegex(AssertionError, "Triton, FlashInfer, or FA3"):
             self._args("torch_native")._handle_page_major_kv_layout()
 
-    def test_unified_memory_still_requires_triton(self):
+    def test_unified_memory_still_requires_triton(self, _mock_mla):
         # The dynamic-split unified pool has only been validated against the
         # Triton path even though the plain envelope layout now also accepts
         # FlashInfer / FA3.
@@ -1657,8 +1661,56 @@ class TestPageMajorKvLayoutBackends(CustomTestCase):
         with self.assertRaisesRegex(AssertionError, "enable-unified-memory requires"):
             args._handle_page_major_kv_layout()
 
-    def test_unified_memory_triton_ok(self):
+    def test_unified_memory_triton_ok(self, _mock_mla):
         args = self._args("triton", enable_unified_memory=True)
+        args._handle_page_major_kv_layout()
+
+    def test_mla_model_rejected(self, mock_mla):
+        # kv_cache_configurator's MLA branches never consult mha_pool_class,
+        # so an MLA model would otherwise silently keep the legacy per-layer
+        # layout instead of erroring.
+        mock_mla.return_value = True
+        with self.assertRaisesRegex(AssertionError, "not supported for MLA models"):
+            self._args("flashinfer")._handle_page_major_kv_layout()
+
+    def test_fa3_page_size_gt1_with_topk_gt1_rejected(self, _mock_mla):
+        # The cascade-attention "expand" path (spec-decode topk > 1) reshapes
+        # the KV buffer, which copies the whole per-layer pool under the
+        # envelope's non-page-contiguous page stride at page_size > 1.
+        args = self._args(
+            "fa3",
+            page_size=4,
+            speculative_algorithm="EAGLE",
+            speculative_eagle_topk=4,
+        )
+        with self.assertRaisesRegex(AssertionError, "speculative decoding topk > 1"):
+            args._handle_page_major_kv_layout()
+
+    def test_fa3_page_size_gt1_without_spec_decode_ok(self, _mock_mla):
+        # No spec decode -> cascade_attn's expand path is never taken, so the
+        # reshape-copy risk doesn't apply.
+        args = self._args("fa3", page_size=4)
+        args._handle_page_major_kv_layout()
+
+    def test_fa3_page_size_gt1_topk1_ok(self, _mock_mla):
+        # topk == 1 never sets use_cascade_attn, even with spec decode on.
+        args = self._args(
+            "fa3",
+            page_size=4,
+            speculative_algorithm="EAGLE",
+            speculative_eagle_topk=1,
+        )
+        args._handle_page_major_kv_layout()
+
+    def test_fa3_page_size1_with_topk_gt1_ok(self, _mock_mla):
+        # page_size == 1 makes the reshape a free view (no copy), regardless
+        # of topk.
+        args = self._args(
+            "fa3",
+            page_size=1,
+            speculative_algorithm="EAGLE",
+            speculative_eagle_topk=4,
+        )
         args._handle_page_major_kv_layout()
 
 
